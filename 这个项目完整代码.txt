@@ -1,0 +1,1483 @@
+项目 'gemini-python' 的结构树:
+📂 gemini-python/
+    📄 .env
+    📄 .env.example
+    📄 debug_google.py
+    📄 har_parser.py
+    📄 install_deps.py
+    📄 main.py
+    📄 requirements.txt
+    📄 start.bat
+    📄 test_debug.py
+    📂 data/
+        📂 projects/
+        📂 sessions/
+    📂 templates/
+        📄 dashboard.html
+================================================================================
+
+--- 文件路径: .env ---
+
+# ====================================================================
+# gemini-python 配置文件
+# ====================================================================
+# --- 核心配置 ---
+API_MASTER_KEY=sk-my-secret-key
+SERVER_PORT=8088
+
+# --- Gemini 认证配置 (必须设置) ---
+# 登录 gemini.google.com 按 F12 -> Application -> Cookies 获取
+GEMINI_1PSID=这里填__Secure-1PSID的值
+GEMINI_1PSIDTS=这里填__Secure-1PSIDTS的值
+
+# --- 网络配置 ---
+# 国内必须填代理，例如 http://127.0.0.1:7890
+PROXY_URL=http://127.0.0.1:7890
+
+--- 文件路径: .env.example ---
+
+# ====================================================================
+# gemini-python 配置文件
+# ====================================================================
+# --- 核心配置 ---
+API_MASTER_KEY=sk-my-secret-key
+SERVER_PORT=8088
+
+# --- Gemini 认证配置 (必须设置) ---
+# 登录 gemini.google.com 按 F12 -> Application -> Cookies 获取
+GEMINI_1PSID=这里填__Secure-1PSID的值
+GEMINI_1PSIDTS=这里填__Secure-1PSIDTS的值
+
+# --- 网络配置 ---
+# 国内必须填代理，例如 http://127.0.0.1:7890
+PROXY_URL=http://127.0.0.1:7890
+
+--- 文件路径: debug_google.py ---
+
+import requests
+import json
+
+# ================= 配置区 =================
+# 1. 填入你的代理
+PROXIES = {
+    "http": "http://127.0.0.1:7890",
+    "https": "http://127.0.0.1:7890"
+}
+
+# 2. 填入你刚才提取的 Cookie (只需要这两个核心的测试)
+COOKIES = {
+    "__Secure-1PSID": "你的值",
+    "__Secure-1PSIDTS": "你的值",
+    # 如果有 CC 也填上
+    "__Secure-1PSIDCC": "你的值" 
+}
+
+# 3. 伪装头 (和 main.py 保持一致)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+}
+# =========================================
+
+def diagnose():
+    print("1. 正在检查代理 IP 归属...")
+    try:
+        ip_info = requests.get("http://ip-api.com/json", proxies=PROXIES, timeout=10).json()
+        print(f"   当前 IP: {ip_info.get('query')} | 地区: {ip_info.get('countryCode')} ({ip_info.get('country')})")
+        if ip_info.get('countryCode') in ['CN', 'HK']:
+            print("   ⚠️ 警告: 香港/中国节点极易导致 Google 验证失败！请切换至 US/SG。")
+    except Exception as e:
+        print(f"   ⚠️ 代理连接失败: {e}")
+        return
+
+    print("\n2. 正在尝试直连 Gemini 首页 (验证 Cookie)...")
+    try:
+        # 访问 Gemini App 首页，库的 init() 就是在做这个
+        resp = requests.get(
+            "https://gemini.google.com/app", 
+            cookies=COOKIES, 
+            headers=HEADERS, 
+            proxies=PROXIES,
+            timeout=20,
+            allow_redirects=False # 禁止自动跳转，我们要看是不是被重定向了
+        )
+        
+        print(f"   HTTP 状态码: {resp.status_code}")
+        
+        if resp.status_code == 302:
+            print("   ❌ 失败: 被重定向了 (通常是跳回登录页)。")
+            print(f"   跳转目标: {resp.headers.get('Location')}")
+            print("   👉 结论: Cookie 失效。请尝试【停止加载大法】重新提取。")
+            
+        elif resp.status_code == 200:
+            # 检查关键 Token 是否存在
+            if "SNlM0e" in resp.text:
+                print("   ✅ 成功: 找到了 'SNlM0e' Token！环境配置没问题。")
+                print("   👉 建议: 既然脚本能通，请确保 data.db 已删除，并重启主程序再试。")
+            else:
+                print("   ❓ 存疑: 状态码 200 但没找到 Token。可能是 Google 返回了验证码页面。")
+                print("   页面标题: ", resp.text.split('<title>')[1].split('</title>')[0] if '<title>' in resp.text else '无标题')
+                
+        else:
+            print(f"   ❌ 失败: 异常状态码。")
+    
+    except Exception as e:
+        print(f"   ❌ 请求发生错误: {e}")
+
+if __name__ == "__main__":
+    diagnose()
+
+--- 文件路径: har_parser.py ---
+
+import json
+import re
+from urllib.parse import urlparse, parse_qs, unquote
+from typing import Dict, Any, Optional, Tuple, List
+
+def extract_best_json(text: str) -> Optional[Dict]:
+    """
+    从混乱的文本中提取最大/最可能的有效 JSON 对象。
+    解决了直接正则匹配在包含多个花括号或日志头时失败的问题。
+    """
+    text = text.strip().replace('\ufeff', '')
+    
+    # 1. 尝试直接解析
+    try:
+        return json.loads(text)
+    except:
+        pass
+
+    # 2. 尝试寻找最外层的 {}
+    starts = [m.start() for m in re.finditer(r'\{', text)]
+    
+    if not starts:
+        return None
+
+    # 从最早的起始点开始，尝试寻找能解析的 JSON
+    for start in starts:
+        # 尝试匹配到字符串末尾的最后一个 }
+        end_search = text.rfind('}')
+        if end_search == -1 or end_search < start:
+            continue
+            
+        candidate_str = text[start : end_search + 1]
+        
+        # 优化：尝试去除 JSON 之前的 BOM 或其他非 JSON 字符
+        if candidate_str.startswith(')]}\''):
+            candidate_str = candidate_str[4:]
+        
+        try:
+            data = json.loads(candidate_str)
+            # 确保是字典类型
+            if isinstance(data, dict):
+                return data 
+        except:
+            continue
+            
+    return None
+
+def parse_cookies_from_header_list(headers: List[Dict]) -> Dict[str, str]:
+    """从 HAR 格式的 headers 列表中提取 Cookie"""
+    cookie_str = ""
+    for header in headers:
+        # 忽略大小写查找 'Cookie' 头
+        if header.get('name', '').lower() == 'cookie':
+            cookie_str = header.get('value', '')
+            break
+    return parse_cookies_from_string(cookie_str)
+
+def parse_cookies_from_string(cookie_string: str) -> Dict[str, str]:
+    """从 Cookie 字符串中提取关键 Cookie。"""
+    if not cookie_string:
+        return {}
+        
+    # 增加更多相关的 Cookie 名称以提高成功率
+    target_keywords = ['PSID', 'PSIDTS', 'SID', 'APISID', 'HSID', 'SSID', 'ENID', 'AEC', 'NID', 'SIDCC']
+    
+    cookies = {}
+    # 先清理字符串，移除可能的 JSON 内容
+    cookie_string = cookie_string.split('"}')[0].split('"]')[0]
+    
+    # 处理可能的分隔符：分号后可能跟空格，也可能没有
+    parts = cookie_string.split(';')
+    for pair in parts:
+        if '=' in pair:
+            name, value = pair.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            
+            # 额外清理：移除 value 中的引号和多余字符
+            value = value.strip('"\'')  # 移除首尾的引号
+            # 移除可能的 JSON 结束符
+            for sep in ['"}', '"]', '}','\n', '\r', '\t']:
+                if sep in value:
+                    value = value.split(sep)[0]
+            
+            # 检查是否包含目标关键词
+            if any(keyword in name for keyword in target_keywords):
+                cookies[name] = value
+                 
+    return cookies
+
+def parse_har_content(har_content: str) -> Tuple[bool, Optional[Dict], str]:
+    """解析 HAR 文件内容，并返回日志。"""
+    log_messages = ["-> 尝试使用标准 HAR/JSON 解析..."]
+    
+    data = extract_best_json(har_content)
+    if not data:
+        log_messages.append("    [失败] 未找到有效的 JSON 结构。")
+        return (False, None, "\n".join(log_messages))
+        
+    target_entry = None
+    
+    # 递归查找包含特定 URL 的 request 对象
+    def find_entry(obj):
+        if isinstance(obj, dict):
+            if 'url' in obj and ('/StreamGenerate' in obj['url'] or 'f.sid' in obj['url']):
+                return obj
+            if 'request' in obj:
+                res = find_entry(obj['request'])
+                if res: return res
+            
+            for key, value in obj.items():
+                if isinstance(value, (dict, list)):
+                    res = find_entry(value)
+                    if res: return res
+        elif isinstance(obj, list):
+            for item in obj:
+                res = find_entry(item)
+                if res: return res
+        return None
+
+    # 优先检查标准的 log -> entries 结构
+    if isinstance(data, dict) and 'log' in data and 'entries' in data['log']:
+        for entry in reversed(data['log']['entries']):
+            if 'request' in entry and 'url' in entry['request']:
+                if '/StreamGenerate' in entry['request']['url'] and entry['request'].get('method') == 'POST':
+                    target_entry = entry['request']
+                    break
+    
+    if not target_entry:
+        target_entry = find_entry(data)
+
+    if not target_entry:
+        log_messages.append("    [失败] 未找到 StreamGenerate API 请求记录。")
+        return (False, None, "\n".join(log_messages)) 
+    
+    log_messages.append("    [成功] 找到目标 API 请求记录。")
+
+    # 1. 提取 f.sid
+    url_parsed = urlparse(target_entry.get('url', ''))
+    query_params = parse_qs(url_parsed.query)
+    f_sid = query_params.get('f.sid', [None])[0]
+    
+    # 2. 提取 at
+    at_param = None
+    post_data = target_entry.get('postData', {})
+    if post_data.get('text'):
+        text_data = post_data.get('text', '')
+        if 'application/x-www-form-urlencoded' in post_data.get('mimeType', ''):
+             params = parse_qs(text_data)
+             at_param_encoded = params.get('at', [None])[0]
+             at_param = unquote(at_param_encoded) if at_param_encoded else None
+        
+        if not at_param:
+            at_match = re.search(r'at=([^&]+)', text_data)
+            if at_match:
+                 at_param = unquote(at_match.group(1))
+
+    # 3. 提取 Cookies - 增强版本
+    extracted_cookies = {}
+    
+    # 方法1: 从 headers 中查找 Cookie
+    if 'headers' in target_entry:
+        extracted_cookies = parse_cookies_from_header_list(target_entry['headers'])
+        log_messages.append(f"    [调试] 从 headers 提取到 {len(extracted_cookies)} 个 Cookie")
+    
+    # 方法2: 如果 headers 没找到，尝试从 cookies 字段获取
+    if not extracted_cookies and 'cookies' in target_entry and isinstance(target_entry['cookies'], list):
+        temp_cookie_str = ""
+        for c in target_entry['cookies']:
+             temp_cookie_str += f"{c['name']}={c['value']}; "
+        extracted_cookies = parse_cookies_from_string(temp_cookie_str)
+        log_messages.append(f"    [调试] 从 cookies 字段提取到 {len(extracted_cookies)} 个 Cookie")
+    
+    # 方法3: 如果还是没有，在整个 HAR 文件中搜索 Cookie
+    if not extracted_cookies:
+        # 递归搜索整个 HAR 文件中的所有 Cookie
+        def find_all_cookies(obj):
+            cookies = {}
+            if isinstance(obj, dict):
+                # 检查是否有 cookie 相关字段
+                for key in ['cookie', 'Cookie', 'cookies']:
+                    if key in obj:
+                        if isinstance(obj[key], str):
+                            cookies.update(parse_cookies_from_string(obj[key]))
+                        elif isinstance(obj[key], list):
+                            for item in obj[key]:
+                                if isinstance(item, dict) and 'name' in item and 'value' in item:
+                                    cookies[item['name']] = item['value']
+                
+                # 递归搜索
+                for value in obj.values():
+                    if isinstance(value, (dict, list)):
+                        cookies.update(find_all_cookies(value))
+            elif isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, (dict, list)):
+                        cookies.update(find_all_cookies(item))
+            return cookies
+        
+        all_cookies = find_all_cookies(data)
+        # 只保留我们需要的 Cookie
+        for name in all_cookies:
+            if any(keyword in name for keyword in ['PSID', 'PSIDTS', 'SID', 'APISID']):
+                extracted_cookies[name] = all_cookies[name]
+        
+        log_messages.append(f"    [调试] 从整个 HAR 文件搜索到 {len(extracted_cookies)} 个关键 Cookie")
+
+    if not f_sid or not at_param:
+        log_messages.append(f"    [失败] 动态参数提取不完整 (fSid: {f_sid}, at: {at_param})。")
+        return (False, None, "\n".join(log_messages)) 
+    log_messages.append(f"    [成功] 提取到 f.sid 和 at 动态参数。")
+    log_messages.append(f"    [状态] 提取到 {len(extracted_cookies)} 个关键 Cookie。")
+
+    if len(extracted_cookies) == 0:
+        log_messages.append("    [⚠️ 警告] 请求头中未发现关键 Cookie！")
+        
+    return (True, {
+        "cookies": extracted_cookies,
+        "dynamicParams": {
+            "fSid": f_sid,
+            "at": at_param
+        }
+    }, "\n".join(log_messages))
+
+def parse_text_segments(text_content: str) -> Tuple[bool, Optional[Dict], str]:
+    """解析非标准分段文本，并返回日志。"""
+    log_messages = ["-> 尝试使用非标准分段文本/正则解析..."]
+    
+    # 1. 提取 URL (f.sid)
+    url_match = re.search(r'(https?://[^\s]*(?:StreamGenerate|StreamGenerate\?)[^\s]*)', text_content)
+    f_sid = None
+    
+    if url_match:
+        full_url = url_match.group(1)
+        log_messages.append(f"    [成功] 提取到 URL: {full_url[:60]}...")
+        url_parsed = urlparse(full_url)
+        query_params = parse_qs(url_parsed.query)
+        f_sid = query_params.get('f.sid', [None])[0]
+    else:
+        # 备用：直接在文本中搜索 f.sid
+        sid_match = re.search(r'f\.sid\s*[:=]\s*([-0-9]+)', text_content)
+        if sid_match:
+             f_sid = sid_match.group(1)
+             log_messages.append(f"    [成功] 直接正则提取到 f.sid: {f_sid}")
+
+    # 2. 提取 at 参数
+    at_param = None
+    at_match = re.search(r'at=([^&\s]+)', text_content)
+    if not at_match:
+        at_match = re.search(r'at\s*[:=]\s*([^\s"]+)', text_content)
+    
+    if at_match:
+        raw_at = at_match.group(1).strip()
+        if '%' in raw_at and raw_at.startswith('A'):
+            at_param = unquote(raw_at)
+        else:
+            at_param = raw_at
+    
+    # 3. 提取 Cookie
+    cookie_header_value = ""
+    cookie_match = re.search(r'(?:Cookie|cookie):\s*([^\r\n]+)', text_content, re.IGNORECASE)
+    if cookie_match:
+        cookie_header_value = cookie_match.group(1).strip()
+    elif 'SID=' in text_content and '__Secure-1PSID=' in text_content:
+        # 如果用户只粘贴了 Cookie 字符串
+         cookie_header_value = text_content 
+
+    extracted_cookies = parse_cookies_from_string(cookie_header_value)
+
+    if not f_sid or not at_param:
+        log_messages.append(f"    [失败] 动态参数提取不完整 (fSid found: {bool(f_sid)}, at found: {bool(at_param)})。")
+        return (False, None, "\n".join(log_messages))
+    
+    log_messages.append(f"    [成功] 提取到 f.sid 和 at 动态参数。")
+    log_messages.append(f"    [状态] 提取到 {len(extracted_cookies)} 个关键 Cookie。")
+    
+    if len(extracted_cookies) == 0:
+        log_messages.append("    [⚠️ 警告] 未能提取到关键 Cookie。")
+    
+    return (True, {
+        "cookies": extracted_cookies,
+        "dynamicParams": {
+            "fSid": f_sid,
+            "at": at_param
+        }
+    }, "\n".join(log_messages))
+
+def parse_and_validate(raw_text: str) -> Tuple[bool, Optional[Dict], str]:
+    """
+    尝试所有解析方法，返回结果和详细日志。
+    """
+    
+    # 1. 尝试 HAR 文件/JSON 请求解析 (最优先)
+    parsed_from_har = parse_har_content(raw_text)
+    if parsed_from_har[0]:
+        return (True, parsed_from_har[1], parsed_from_har[2] + "\n✅ 提取成功! (格式: HAR/JSON)")
+
+    # 2. 尝试手动粘贴的分段文本解析 (正则兜底，兼容 cURL/Request Headers 格式)
+    parsed_from_segments = parse_text_segments(raw_text)
+    if parsed_from_segments[0]:
+        return (True, parsed_from_segments[1], parsed_from_segments[2] + "\n✅ 提取成功! (格式: 正则文本)")
+    
+    # 全部失败，组合详细日志
+    final_log = "\n--- ❌ 提取失败：详细解析日志 ---\n" + \
+                "--- 1. HAR/JSON 解析尝试 --- \n" + parsed_from_har[2] + "\n" + \
+                "--- 2. 分段文本解析尝试 --- \n" + parsed_from_segments[2] + "\n"
+    
+    return (False, None, final_log + "\n❌ 粘贴的内容解析失败。请确保您粘贴了包含 StreamGenerate 请求的完整内容。")
+
+--- 文件路径: install_deps.py ---
+
+import subprocess
+import sys
+
+def install(package):
+    """安装 Python 包"""
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+def main():
+    print("正在安装必要的依赖...")
+    
+    packages = [
+        "fastapi",
+        "uvicorn[standard]",
+        "pydantic-settings",
+        "python-dotenv",
+        "httpx",
+        "loguru",
+        "jinja2",
+        "requests",
+        "gemini_webapi>=1.17.3"
+    ]
+    
+    for package in packages:
+        try:
+            print(f"安装 {package}...")
+            install(package)
+            print(f"✅ {package} 安装成功")
+        except Exception as e:
+            print(f"❌ {package} 安装失败: {e}")
+    
+    print("\n所有依赖安装完成！现在可以运行 start.bat 启动服务器了。")
+
+if __name__ == "__main__":
+    main()
+
+--- 文件路径: main.py ---
+
+import sys
+import sqlite3
+import random
+import time
+import webbrowser
+import uvicorn
+import asyncio
+import json
+import requests
+from typing import AsyncGenerator
+
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic_settings import BaseSettings
+from loguru import logger
+from contextlib import asynccontextmanager
+
+# 引入 gemini_webapi 逆向库
+from gemini_webapi import GeminiClient
+# 引入 HAR 解析模块
+from har_parser import parse_and_validate
+
+# --- 1. 配置加载 ---
+class Settings(BaseSettings):
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": 'utf-8',
+        "extra": "ignore"
+    }
+    PORT: int = 8090
+    PROXY_URL: str = "http://127.0.0.1:7890"  # 记得改成你的代理端口
+    GEMINI_1PSID: str = "" 
+    GEMINI_1PSIDTS: str = "" 
+
+settings = Settings()
+
+# --- 2. 数据库逻辑 ---
+DB_FILE = "data.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS accounts
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT,
+                  cookie_1psid TEXT,
+                  cookie_1psidts TEXT,
+                  cookie_1psidcc TEXT,
+                  cookie_json TEXT,  
+                  is_active INTEGER DEFAULT 1,
+                  total_calls INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS logs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp TEXT,
+                  account_name TEXT,
+                  model TEXT,
+                  status TEXT,
+                  duration INTEGER)''')
+    conn.commit()
+    conn.close()
+
+def get_db_conn():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# --- 3. 调试函数 ---
+async def debug_google_connection(name: str, cookies: dict, proxy_url: str = None):
+    """调试 Google 连接问题，返回详细的诊断信息"""
+    debug_info = {
+        "ip_info": None,
+        "gemini_response": None,
+        "error": None
+    }
+    
+    # 1. 检查代理 IP 归属
+    try:
+        proxies = None
+        if proxy_url:
+            proxies = {
+                "http": proxy_url,
+                "https": proxy_url
+            }
+        
+        ip_response = requests.get("http://ip-api.com/json", proxies=proxies, timeout=10)
+        ip_info = ip_response.json()
+        debug_info["ip_info"] = ip_info
+        
+        logger.info(f"🔍 调试 [{name}] - IP: {ip_info.get('query')} | 地区: {ip_info.get('countryCode')} ({ip_info.get('country')})")
+        
+        if ip_info.get('countryCode') in ['CN', 'HK']:
+            logger.warning(f"⚠️ 警告: 香港/中国节点极易导致 Google 验证失败！")
+    except Exception as e:
+        logger.error(f"🔍 调试 [{name}] - 代理连接失败: {e}")
+        debug_info["error"] = f"代理连接失败: {e}"
+        return debug_info
+    
+    # 2. 尝试访问 Gemini 首页
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        }
+        
+        resp = requests.get(
+            "https://gemini.google.com/app",
+            cookies=cookies,
+            headers=headers,
+            proxies=proxies,
+            timeout=20,
+            allow_redirects=False
+        )
+        
+        debug_info["gemini_response"] = {
+            "status_code": resp.status_code,
+            "headers": dict(resp.headers),
+            "has_snlM0e": "SNlM0e" in resp.text,
+            "content_length": len(resp.text)
+        }
+        
+        logger.info(f"🔍 调试 [{name}] - Gemini 响应状态: {resp.status_code}")
+        
+        if resp.status_code == 302:
+            location = resp.headers.get('Location', '未知')
+            logger.error(f"🔍 调试 [{name}] - 被重定向到: {location}")
+            debug_info["error"] = f"Cookie 失效，被重定向到: {location}"
+            
+        elif resp.status_code == 200:
+            if "SNlM0e" in resp.text:
+                logger.success(f"🔍 调试 [{name}] - 找到 SNlM0e Token，连接正常！")
+            else:
+                # 提取页面标题
+                title = "无标题"
+                if '<title>' in resp.text:
+                    try:
+                        title = resp.text.split('<title>')[1].split('</title>')[0]
+                    except:
+                        pass
+                logger.warning(f"🔍 调试 [{name}] - 状态码 200 但未找到 Token，页面标题: {title}")
+                debug_info["error"] = f"未找到 SNlM0e Token，可能返回了验证页面: {title}"
+        else:
+            logger.error(f"🔍 调试 [{name}] - 异常状态码: {resp.status_code}")
+            debug_info["error"] = f"异常状态码: {resp.status_code}"
+            
+    except Exception as e:
+        logger.error(f"🔍 调试 [{name}] - 请求错误: {e}")
+        debug_info["error"] = f"请求错误: {e}"
+    
+    return debug_info
+
+# --- 4. 辅助函数：流式生成器 ---
+async def pseudo_stream_generator(text: str, model: str) -> AsyncGenerator[bytes, None]:
+    chunk_id = f"chatcmpl-{int(time.time())}"
+    created = int(time.time())
+    
+    step = 4 
+    for i in range(0, len(text), step):
+        chunk_text = text[i:i+step]
+        data = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"content": chunk_text}, "finish_reason": None}]
+        }
+        yield f"data: {json.dumps(data)}\n\n".encode('utf-8')
+        await asyncio.sleep(0.02)
+
+    final_data = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    }
+    yield f"data: {json.dumps(final_data)}\n\n".encode('utf-8')
+    yield b"data: [DONE]\n\n"
+
+# --- 4. 核心处理逻辑 ---
+async def process_gemini_request(request_data: dict, is_stream: bool):
+    messages = request_data.get("messages", [])
+    if not messages:
+        raise ValueError("请求缺少messages参数")
+    
+    model = request_data.get("model", "gemini-2.5-pro")
+    if model not in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-pro"]:
+        logger.warning(f"未知模型: {model}，自动回退到 gemini-2.5-pro")
+        model = "gemini-2.5-pro"
+    
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM accounts WHERE is_active = 1")
+    accounts = cursor.fetchall()
+    
+    if not accounts:
+        conn.close()
+        raise Exception("❌ 错误：没有启用的账号，请在面板添加！")
+
+    account = random.choice(accounts)
+    acc_id = account["id"]
+    acc_name = account["name"]
+    
+    # 优先从 JSON 读取全量 Cookie
+    all_cookies = {}
+    if "cookie_json" in account.keys() and account["cookie_json"]:
+        try:
+            all_cookies = json.loads(account["cookie_json"])
+        except:
+            pass
+    
+    # 回退机制
+    if not all_cookies:
+        all_cookies = {
+            "__Secure-1PSID": account["cookie_1psid"],
+            "__Secure-1PSIDTS": account["cookie_1psidts"]
+        }
+        if "cookie_1psidcc" in account.keys() and account["cookie_1psidcc"]:
+             all_cookies["__Secure-1PSIDCC"] = account["cookie_1psidcc"]
+
+    start_time = time.time()
+    status = "ERROR"
+    
+    try:
+        logger.info(f"🔄 账号 [{acc_name}] 正在处理请求...")
+        
+        # 初始化客户端
+        client = GeminiClient(
+            proxy=settings.PROXY_URL
+        )
+        
+        # 注入全量 Cookie (包含 17 个)
+        client.cookies.update(all_cookies)
+        
+        # 启动初始化 (带超时保护)
+        await client.init(timeout=60, auto_close=True)
+        
+        full_prompt = ""
+        for m in messages:
+            if m['role'] == 'user':
+                full_prompt += f"User: {m['content']}\n"
+            elif m['role'] == 'assistant':
+                full_prompt += f"Model: {m['content']}\n"
+            elif m['role'] == 'system':
+                full_prompt += f"System: {m['content']}\n"
+        
+        response = await client.generate_content(full_prompt, model=model)
+        text = response.text
+        
+        status = "SUCCESS"
+        cursor.execute("UPDATE accounts SET total_calls = total_calls + 1 WHERE id = ?", (acc_id,))
+        conn.commit()
+        
+        if is_stream:
+            return StreamingResponse(pseudo_stream_generator(text, model), media_type="text/event-stream")
+        else:
+            return JSONResponse({
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]
+            })
+
+    except Exception as e:
+        logger.error(f"❌ 账号 [{acc_name}] 调用失败: {e}")
+        
+        # 🔍 如果是 Cookie 相关错误，执行详细调试
+        if "Cookies invalid" in str(e) or "location" in str(e).lower():
+            logger.warning(f"🔍 检测到 Cookie/IP 问题，对账号 [{acc_name}] 进行诊断...")
+            debug_cookies = {
+                "__Secure-1PSID": cookie_1psid,
+                "__Secure-1PSIDTS": cookie_1psidts
+            }
+            if cookie_1psidcc:
+                debug_cookies["__Secure-1PSIDCC"] = cookie_1psidcc
+                
+            # 注意：这里是同步调用，因为 debug_google_connection 是异步的
+            # 在 except 块中我们不能使用 await，所以创建一个同步版本
+            try:
+                loop = asyncio.get_event_loop()
+                debug_result = loop.run_until_complete(debug_google_connection(acc_name, debug_cookies, settings.PROXY_URL))
+                
+                # 记录调试结果到日志
+                if debug_result["ip_info"]:
+                    ip_info = debug_result["ip_info"]
+                    logger.info(f"🔍 [{acc_name}] IP: {ip_info.get('query')} ({ip_info.get('countryCode', '未知')})")
+                
+                if debug_result["error"]:
+                    logger.error(f"🔍 [{acc_name}] 诊断结果: {debug_result['error']}")
+            except Exception as debug_err:
+                logger.error(f"🔍 [{acc_name}] 诊断失败: {debug_err}")
+        
+        if "Cookies invalid" in str(e):
+             logger.critical(f"⚠️ 账号 [{acc_name}] Cookie 已失效或 IP 被拒，请更新！")
+        raise e
+    
+    finally:
+        duration = int((time.time() - start_time) * 1000)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("INSERT INTO logs (timestamp, account_name, model, status, duration) VALUES (?, ?, ?, ?, ?)",
+                       (timestamp, acc_name, model, status, duration))
+        conn.commit()
+        conn.close()
+
+# --- 5. FastAPI 应用初始化 ---
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    url = f"http://127.0.0.1:{settings.PORT}"
+    logger.success(f"🚀 服务启动成功！")
+    logger.info(f"👉 管理面板: {url}")
+    logger.info(f"👉 API 地址: {url}/v1/chat/completions")
+    webbrowser.open(url)
+    yield
+
+app = FastAPI(lifespan=lifespan, title="Gemini Desktop API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+templates = Jinja2Templates(directory="templates")
+
+# === 路由部分 ===
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    conn = get_db_conn()
+    accounts = conn.execute("SELECT * FROM accounts").fetchall()
+    logs = conn.execute("SELECT * FROM logs ORDER BY id DESC LIMIT 20").fetchall()
+    conn.close()
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request, 
+        "accounts": accounts, 
+        "logs": logs, 
+        "proxy": settings.PROXY_URL,
+        "api_url": f"http://127.0.0.1:{settings.PORT}"
+    })
+
+@app.post("/account/add")
+async def add_account(name: str = Form(...), p1: str = Form(...), p2: str = Form(...)):
+    conn = get_db_conn()
+    # 手动添加只存基础的，不推荐
+    cookies_json = json.dumps({"__Secure-1PSID": p1, "__Secure-1PSIDTS": p2})
+    conn.execute("INSERT INTO accounts (name, cookie_1psid, cookie_1psidts, cookie_json) VALUES (?, ?, ?, ?)", 
+                 (name, p1, p2, cookies_json))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/", status_code=303)
+
+@app.get("/account/delete/{id}")
+async def delete_account(id: int):
+    conn = get_db_conn()
+    conn.execute("DELETE FROM accounts WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/", status_code=303)
+
+@app.get("/account/toggle/{id}")
+async def toggle_account(id: int):
+    conn = get_db_conn()
+    conn.execute("UPDATE accounts SET is_active = NOT is_active WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/", status_code=303)
+
+@app.get("/logs/clear")
+async def clear_logs():
+    conn = get_db_conn()
+    conn.execute("DELETE FROM logs")
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/", status_code=303)
+
+@app.post("/api/extract-cookies")
+async def extract_cookies_from_har(request: Request):
+    try:
+        data = await request.json()
+        raw_text = data.get("content", "")
+        if not raw_text.strip():
+            return JSONResponse(status_code=400, content={"success": False, "error": "内容为空"})
+        
+        success, session_data, logs = parse_and_validate(raw_text)
+        
+        if success and session_data:
+            cookies = session_data.get("cookies", {})
+            return JSONResponse({
+                "success": True,
+                "data": {"cookies": cookies},
+                "logs": logs
+            })
+        else:
+            return JSONResponse({"success": False, "error": "解析失败", "logs": logs})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+@app.post("/api/auto-add-account")
+async def auto_add_account(request: Request):
+    """自动添加从 HAR/请求中提取的账号（带自动验证功能）"""
+    try:
+        data = await request.json()
+        name = data.get("name", "自动提取账号")
+        cookies = data.get("cookies", {})
+        
+        # 1. 获取必要的 Cookie
+        cookie_1psid = cookies.get("__Secure-1PSID", "")
+        cookie_1psidts = cookies.get("__Secure-1PSIDTS", "")
+        cookie_1psidcc = cookies.get("__Secure-1PSIDCC", "")
+        
+        if not cookie_1psid or not cookie_1psidts:
+            return JSONResponse({
+                "success": False,
+                "error": "缺少必要的 Cookie",
+                "message": "需要 __Secure-1PSID 和 __Secure-1PSIDTS"
+            })
+
+        # 2. 🔍【关键步骤】在存入数据库前，先进行连通性测试
+        logger.info(f"🧪 正在验证账号 [{name}] 的有效性...")
+        
+        try:
+            # 初始化临时客户端
+            # 修改点：使用 proxy 字符串参数
+            temp_client = GeminiClient(
+                secure_1psid=cookie_1psid,
+                secure_1psidts=cookie_1psidts,
+                proxy=settings.PROXY_URL
+            )
+            
+            # 手动注入 CC Cookie
+            if cookie_1psidcc:
+                temp_client.cookies["__Secure-1PSIDCC"] = cookie_1psidcc
+
+            # ⚡ 尝试连接 Google (设置 30 秒超时)
+            await temp_client.init(timeout=30, auto_close=True)
+            logger.success(f"✅ 账号 [{name}] 验证通过！")
+            
+        except Exception as verify_err:
+            error_str = str(verify_err)
+            logger.error(f"❌ 账号验证失败: {error_str}")
+            
+            # 🔍 执行详细调试
+            logger.info(f"🔍 开始对账号 [{name}] 进行详细诊断...")
+            debug_cookies = {
+                "__Secure-1PSID": cookie_1psid,
+                "__Secure-1PSIDTS": cookie_1psidts
+            }
+            if cookie_1psidcc:
+                debug_cookies["__Secure-1PSIDCC"] = cookie_1psidcc
+                
+            # 使用 asyncio.run 来运行异步调试函数
+            try:
+                debug_result = await debug_google_connection(name, debug_cookies, settings.PROXY_URL)
+            except Exception as debug_err:
+                logger.error(f"🔍 诊断过程出错: {debug_err}")
+                debug_result = {"error": f"诊断失败: {debug_err}"}
+            
+            # 分析错误原因，返回给前端
+            tips = "未知错误"
+            if "Cookies invalid" in error_str:
+                tips = "Cookie 无效。请确保复制了 StreamGenerate 请求，并且是在无痕模式下操作。"
+            elif "Timeout" in error_str or "ConnectError" in error_str:
+                tips = "连接 Google 超时。请检查代理是否稳定 (推荐美国节点)。"
+            elif "location" in error_str.lower():
+                tips = "IP 地区可能不支持。请更换美国/新加坡节点。"
+            
+            # 构建详细的错误信息
+            detailed_msg = f"🚫 无法连接 Google：{tips}\n\n技术报错: {error_str}\n\n🔍 诊断信息:\n"
+            
+            if debug_result["ip_info"]:
+                ip_info = debug_result["ip_info"]
+                detailed_msg += f"• IP: {ip_info.get('query')} ({ip_info.get('countryCode', '未知')})\n"
+            
+            if debug_result["gemini_response"]:
+                gemini_resp = debug_result["gemini_response"]
+                detailed_msg += f"• Gemini 响应: {gemini_resp['status_code']}\n"
+                if gemini_resp["status_code"] == 302:
+                    detailed_msg += f"• 重定向到: {gemini_resp['headers'].get('Location', '未知')}\n"
+                elif gemini_resp["status_code"] == 200 and not gemini_resp["has_snlM0e"]:
+                    detailed_msg += "• 未找到 SNlM0e Token\n"
+            
+            if debug_result["error"]:
+                detailed_msg += f"• 错误: {debug_result['error']}\n"
+
+            return JSONResponse({
+                "success": False, 
+                "error": "验证失败", 
+                "message": detailed_msg
+            })
+
+        # 3. 验证通过，存入数据库
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        # 检查是否已存在
+        existing = cursor.execute(
+            "SELECT id FROM accounts WHERE cookie_1psid = ?", 
+            (cookie_1psid,)
+        ).fetchone()
+        
+        if existing:
+            conn.close()
+            return JSONResponse({
+                "success": False,
+                "error": "账号已存在",
+                "message": "该 Cookie 对应的账号已经添加过了"
+            })
+        
+        # 插入新账号 (包含 1PSIDCC)
+        cursor.execute(
+            "INSERT INTO accounts (name, cookie_1psid, cookie_1psidts, cookie_1psidcc) VALUES (?, ?, ?, ?)",
+            (name, cookie_1psid, cookie_1psidts, cookie_1psidcc)
+        )
+        conn.commit()
+        conn.close()
+        
+        return JSONResponse({
+            "success": True,
+            "message": f"🎉 账号 '{name}' 验证通过并添加成功！",
+            "account_id": cursor.lastrowid
+        })
+        
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+@app.post("/v1/chat/completions")
+async def chat_api(request: Request):
+    data = await request.json()
+    is_stream = data.get("stream", False)
+    try:
+        return await process_gemini_request(data, is_stream)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": {"message": str(e), "type": "internal_error"}})
+
+@app.get("/v1/models")
+async def models_api():
+    current_time = int(time.time())
+    return {
+        "object": "list",
+        "data": [{"id": "gemini-2.5-pro", "created": current_time, "object": "model", "owned_by": "google"}]
+    }
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=settings.PORT, reload=False)
+
+--- 文件路径: requirements.txt ---
+
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+httpx
+loguru
+jinja2
+gemini_webapi>=1.17.3
+requests
+
+--- 文件路径: start.bat ---
+
+@echo off
+chcp 65001 >nul
+title Gemini Desktop API Server
+color 0A
+
+echo ==========================================
+echo       Gemini Desktop API Server
+echo ==========================================
+echo.
+
+:: 检查Python
+py --version >nul 2>&1
+if errorlevel 1 (
+    echo [错误] 未找到Python，请先安装Python 3.8+
+    pause
+    exit /b 1
+)
+
+:: 检查并安装依赖
+echo [信息] 检查依赖...
+py -m pip show fastapi >nul 2>&1
+if errorlevel 1 (
+    echo [信息] 正在安装依赖包...
+    py -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo [错误] 依赖安装失败
+        pause
+        exit /b 1
+    )
+)
+
+:: 确保安装 requests（调试功能需要）
+py -m pip show requests >nul 2>&1
+if errorlevel 1 (
+    echo [信息] 安装 requests 模块（调试功能需要）...
+    py -m pip install requests
+    if errorlevel 1 (
+        echo [警告] requests 安装失败，调试功能可能不可用
+    )
+)
+
+:: 检查配置文件
+if not exist ".env" (
+    echo [警告] 未找到.env配置文件，将从.env.example复制
+    copy ".env.example" ".env" >nul 2>&1
+    echo [提示] 请编辑.env文件并填入你的Cookie信息
+)
+
+echo.
+echo [信息] 正在启动服务器...
+echo [提示] 服务器启动后会自动打开浏览器
+echo [提示] 按 Ctrl+C 停止服务器
+echo.
+
+:: 启动服务器
+py main.py
+
+if errorlevel 1 (
+    echo.
+    echo [错误] 服务器启动失败
+    pause
+)
+
+--- 文件路径: test_debug.py ---
+
+import asyncio
+import sys
+sys.path.append('.')
+
+from main import debug_google_connection
+
+async def test_debug():
+    # 测试用的 Cookie（请替换为实际的）
+    test_cookies = {
+        "__Secure-1PSID": "test_value",
+        "__Secure-1PSIDTS": "test_value",
+    }
+    
+    proxy = "http://127.0.0.1:7890"
+    
+    print("开始测试调试功能...")
+    result = await debug_google_connection("测试账号", test_cookies, proxy)
+    
+    print("\n=== 诊断结果 ===")
+    print(f"IP 信息: {result.get('ip_info')}")
+    print(f"Gemini 响应: {result.get('gemini_response')}")
+    print(f"错误: {result.get('error')}")
+
+if __name__ == "__main__":
+    asyncio.run(test_debug())
+
+--- 文件路径: templates\dashboard.html ---
+
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini 逆向 API 控制台</title>
+    <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.1/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f0f2f5; padding: 20px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .card { border: none; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom: 20px; transition: transform 0.2s; }
+        .card:hover { transform: translateY(-2px); }
+        .api-box { background: #2d3436; color: #dfe6e9; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 0.9rem; position: relative; }
+        .copy-btn { position: absolute; right: 10px; top: 10px; font-size: 0.8rem; padding: 2px 8px; }
+        .status-dot { height: 10px; width: 10px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .status-active { background-color: #00b894; box-shadow: 0 0 5px #00b894; }
+        .status-inactive { background-color: #d63031; }
+        .loading-spinner { display: inline-block; width: 1rem; height: 1rem; border: 2px solid #f3f3f3; border-top: 2px solid #3498db; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container" style="max-width: 1200px;">
+        <header class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2 class="fw-bold text-primary mb-0">🤖 Gemini 逆向 API 控制台</h2>
+                <small class="text-muted">本地高性能代理服务 • 无需 Docker</small>
+            </div>
+            <span class="badge bg-info text-dark">当前代理: {{ proxy }}</span>
+        </header>
+
+        <div class="row">
+            <div class="col-lg-4">
+                
+                <div class="card p-3 border-primary border-2">
+                    <h5 class="card-title text-primary fw-bold mb-3">🚀 API 连接配置</h5>
+                    <p class="small text-muted mb-2">请将以下信息填入 NextChat / ChatBox 等软件：</p>
+                    
+                    <div class="mb-3">
+                        <label class="small fw-bold text-muted">接口地址 (Base URL):</label>
+                        <div class="api-box">
+                            {{ api_url }}
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="small fw-bold text-muted">API Key (密钥):</label>
+                        <div class="api-box">
+                            sk-any-key (任意填写)
+                        </div>
+                    </div>
+
+                    <div class="mb-1">
+                        <label class="small fw-bold text-muted">推荐模型名称:</label>
+                        <div class="d-flex gap-2 flex-wrap">
+                            <span class="badge bg-secondary">gemini-2.5-pro</span>
+                            <span class="badge bg-secondary">gemini-2.5-flash</span>
+                            <span class="badge bg-secondary">gemini-pro</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 自动提取功能 -->
+                <div class="card p-3 mb-3">
+                    <h5 class="card-title mb-3">🔮 智能提取 Cookie</h5>
+                    <p class="small text-muted mb-2">
+                        <strong>支持格式：</strong>HAR文件、网络请求头、cURL命令<br>
+                        <strong>获取方法：</strong>F12 → Network → 找到 StreamGenerate → 右键 → Copy → Copy as HAR
+                    </p>
+                    
+                    <div class="mb-2">
+                        <label class="small text-muted">粘贴 HAR/请求内容：</label>
+                        <textarea id="harContent" class="form-control" rows="4" placeholder="粘贴 HAR 文件内容或网络请求信息..."></textarea>
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-info" onclick="extractCookies()">
+                            📡 自动提取 Cookie
+                        </button>
+                    </div>
+                    
+                    <!-- 提取结果显示 -->
+                    <div id="extractResult" class="mt-3" style="display: none;">
+                        <div class="alert alert-info" role="alert">
+                            <h6 class="alert-heading">📊 提取日志</h6>
+                            <pre id="extractLogs" class="mb-0 small" style="white-space: pre-wrap; max-height: 200px; overflow-y: auto;"></pre>
+                        </div>
+                        
+                        <div id="extractedCookiesSection" style="display: none;">
+                            <h6 class="small text-muted mb-2">提取到的 Cookie：</h6>
+                            <div id="extractedCookiesList" class="small mb-2"></div>
+                            
+                            <div class="input-group mb-2">
+                                <input type="text" id="extractedAccountName" class="form-control" placeholder="账号备注名">
+                                <button class="btn btn-success" type="button" onclick="autoAddAccount()">
+                                    ➕ 添加到账号池
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 手动添加功能 -->
+                <div class="card p-3">
+                    <h5 class="card-title mb-3">➕ 手动添加 Gemini 账号</h5>
+                    <form action="/account/add" method="post">
+                        <div class="mb-2">
+                            <label class="small text-muted">备注名</label>
+                            <input type="text" class="form-control" name="name" placeholder="例如: 谷歌主号" required>
+                        </div>
+                        <div class="mb-2">
+                            <label class="small text-muted">Cookie: __Secure-1PSID</label>
+                            <input type="text" class="form-control" name="p1" placeholder="从浏览器 F12 获取" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="small text-muted">Cookie: __Secure-1PSIDTS</label>
+                            <input type="text" class="form-control" name="p2" placeholder="从浏览器 F12 获取" required>
+                        </div>
+                        <button type="submit" class="btn btn-dark w-100">确认添加</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="col-lg-8">
+                
+                <div class="card p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="card-title m-0">👥 账号负载均衡池</h5>
+                        <span class="badge bg-light text-dark border">共 {{ accounts|length }} 个账号</span>
+                    </div>
+                    
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>状态</th>
+                                    <th>备注</th>
+                                    <th>Cookie预览</th>
+                                    <th>累计调用</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% if not accounts %}
+                                <tr><td colspan="5" class="text-center text-muted py-4">暂无账号，请在左侧添加</td></tr>
+                                {% endif %}
+                                {% for acc in accounts %}
+                                <tr>
+                                    <td>
+                                        {% if acc.is_active %}
+                                        <span class="status-dot status-active"></span><span class="small text-success">启用</span>
+                                        {% else %}
+                                        <span class="status-dot status-inactive"></span><span class="small text-danger">禁用</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="fw-bold">{{ acc.name }}</td>
+                                    <td class="small text-muted" style="font-family: monospace;">{{ acc.cookie_1psid[:8] }}...</td>
+                                    <td><span class="badge bg-primary rounded-pill">{{ acc.total_calls }}</span></td>
+                                    <td>
+                                        <a href="/account/toggle/{{ acc.id }}" class="btn btn-sm btn-outline-secondary py-0">切换</a>
+                                        <a href="/account/delete/{{ acc.id }}" class="btn btn-sm btn-outline-danger py-0">删除</a>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="card-title m-0">📊 实时调用日志</h5>
+                        <a href="/logs/clear" class="btn btn-sm btn-light border">清空日志</a>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped">
+                            <thead><tr><th>时间</th><th>执行账号</th><th>模型</th><th>耗时</th><th>状态</th></tr></thead>
+                            <tbody>
+                                {% if not logs %}
+                                <tr><td colspan="5" class="text-center text-muted py-3">暂无调用记录</td></tr>
+                                {% endif %}
+                                {% for log in logs %}
+                                <tr>
+                                    <td class="small">{{ log.timestamp.split(' ')[1] }}</td>
+                                    <td class="small">{{ log.account_name }}</td>
+                                    <td><span class="badge bg-secondary" style="font-size: 0.7rem">{{ log.model }}</span></td>
+                                    <td class="small">{{ log.duration }}ms</td>
+                                    <td>
+                                        {% if log.status == 'SUCCESS' %}
+                                        <span class="badge bg-success">成功</span>
+                                        {% else %}
+                                        <span class="badge bg-danger">失败</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let extractedData = null;
+
+        async function extractCookies() {
+            const harContent = document.getElementById('harContent').value.trim();
+            const resultDiv = document.getElementById('extractResult');
+            const logsPre = document.getElementById('extractLogs');
+            const cookiesSection = document.getElementById('extractedCookiesSection');
+            const cookiesList = document.getElementById('extractedCookiesList');
+            
+            if (!harContent) {
+                alert('请粘贴 HAR 文件内容或网络请求信息');
+                return;
+            }
+
+            // 显示加载状态
+            const extractBtn = event.target;
+            const originalText = extractBtn.innerHTML;
+            extractBtn.innerHTML = '<span class="loading-spinner"></span> 正在解析...';
+            extractBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/extract-cookies', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ content: harContent })
+                });
+
+                const result = await response.json();
+                
+                // 显示结果区域
+                resultDiv.style.display = 'block';
+                logsPre.textContent = result.logs || '无日志信息';
+
+                if (result.success && result.data) {
+                    extractedData = result.data;
+                    
+                    // 显示提取到的 Cookie
+                    const cookies = result.data.cookies;
+                    const missingCookies = result.data.missing_cookies || [];
+                    
+                    let cookiesHtml = '';
+                    for (const [name, value] of Object.entries(cookies)) {
+                        const isMissing = missingCookies.includes(name);
+                        cookiesHtml += `
+                            <div class="mb-1">
+                                <span class="badge ${isMissing ? 'bg-warning' : 'bg-success'}">${name}</span>
+                                <code class="ms-2">${value.substring(0, 30)}${value.length > 30 ? '...' : ''}</code>
+                                ${isMissing ? '<small class="text-warning ms-2">(可能缺失)</small>' : ''}
+                            </div>
+                        `;
+                    }
+                    
+                    cookiesList.innerHTML = cookiesHtml || '<p class="text-muted">未提取到 Cookie</p>';
+                    
+                    // 显示 Cookie 列表和添加按钮
+                    cookiesSection.style.display = 'block';
+                    
+                    // 设置默认账号名
+                    const accountNameInput = document.getElementById('extractedAccountName');
+                    if (!accountNameInput.value) {
+                        accountNameInput.value = `自动提取_${new Date().toLocaleString()}`;
+                    }
+                } else {
+                    extractedData = null;
+                    cookiesSection.style.display = 'none';
+                    
+                    if (result.error) {
+                        logsPre.textContent += '\n\n❌ 错误: ' + result.error;
+                    }
+                }
+            } catch (error) {
+                console.error('提取失败:', error);
+                resultDiv.style.display = 'block';
+                logsPre.textContent = '网络请求失败: ' + error.message;
+                cookiesSection.style.display = 'none';
+            } finally {
+                // 恢复按钮状态
+                extractBtn.innerHTML = originalText;
+                extractBtn.disabled = false;
+            }
+        }
+
+        async function autoAddAccount() {
+            if (!extractedData || !extractedData.cookies) {
+                alert('请先提取 Cookie');
+                return;
+            }
+
+            const accountName = document.getElementById('extractedAccountName').value.trim();
+            if (!accountName) {
+                alert('请输入账号备注名');
+                return;
+            }
+
+            const addBtn = event.target;
+            const originalText = addBtn.innerHTML;
+            addBtn.innerHTML = '<span class="loading-spinner"></span> 添加中...';
+            addBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/auto-add-account', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        name: accountName,
+                        cookies: extractedData.cookies
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    alert('账号添加成功！');
+                    // 刷新页面以显示新账号
+                    window.location.reload();
+                } else {
+                    alert('添加失败: ' + (result.error || result.message || '未知错误'));
+                }
+            } catch (error) {
+                console.error('添加账号失败:', error);
+                alert('网络请求失败: ' + error.message);
+            } finally {
+                // 恢复按钮状态
+                addBtn.innerHTML = originalText;
+                addBtn.disabled = false;
+            }
+        }
+
+        // 页面加载完成后的初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            // 可以在这里添加更多初始化代码
+        });
+    </script>
+</body>
+</html>
+
+
