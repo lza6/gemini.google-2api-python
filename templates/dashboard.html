@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini 逆向 API 控制台</title>
+    <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.1/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f0f2f5; padding: 20px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .card { border: none; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom: 20px; transition: transform 0.2s; }
+        .card:hover { transform: translateY(-2px); }
+        .api-box { background: #2d3436; color: #dfe6e9; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 0.9rem; position: relative; }
+        .copy-btn { position: absolute; right: 10px; top: 10px; font-size: 0.8rem; padding: 2px 8px; }
+        .status-dot { height: 10px; width: 10px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .status-active { background-color: #00b894; box-shadow: 0 0 5px #00b894; }
+        .status-inactive { background-color: #d63031; }
+        .loading-spinner { display: inline-block; width: 1rem; height: 1rem; border: 2px solid #f3f3f3; border-top: 2px solid #3498db; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container" style="max-width: 1200px;">
+        <header class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2 class="fw-bold text-primary mb-0">🤖 Gemini 逆向 API 控制台</h2>
+                <small class="text-muted">本地高性能代理服务 • 无需 Docker</small>
+            </div>
+            <span class="badge bg-info text-dark">当前代理: {{ proxy }}</span>
+        </header>
+
+        <div class="row">
+            <div class="col-lg-4">
+                
+                <div class="card p-3 border-primary border-2">
+                    <h5 class="card-title text-primary fw-bold mb-3">🚀 API 连接配置</h5>
+                    <p class="small text-muted mb-2">请将以下信息填入 NextChat / ChatBox 等软件：</p>
+                    
+                    <div class="mb-3">
+                        <label class="small fw-bold text-muted">接口地址 (Base URL):</label>
+                        <div class="api-box">
+                            {{ api_url }}
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="small fw-bold text-muted">API Key (密钥):</label>
+                        <div class="api-box">
+                            sk-any-key (任意填写)
+                        </div>
+                    </div>
+
+                    <div class="mb-1">
+                        <label class="small fw-bold text-muted">推荐模型名称:</label>
+                        <div class="d-flex gap-2 flex-wrap">
+                            <span class="badge bg-secondary">gemini-2.5-pro</span>
+                            <span class="badge bg-secondary">gemini-2.5-flash</span>
+                            <span class="badge bg-secondary">gemini-pro</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 自动提取功能 -->
+                <div class="card p-3 mb-3">
+                    <h5 class="card-title mb-3">🔮 智能提取 Cookie</h5>
+                    <p class="small text-muted mb-2">
+                        <strong>支持格式：</strong>HAR文件、网络请求头、cURL命令<br>
+                        <strong>获取方法：</strong>F12 → Network → 找到 StreamGenerate → 右键 → Copy → Copy as HAR
+                    </p>
+                    
+                    <div class="mb-2">
+                        <label class="small text-muted">粘贴 HAR/请求内容：</label>
+                        <textarea id="harContent" class="form-control" rows="4" placeholder="粘贴 HAR 文件内容或网络请求信息..."></textarea>
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-info" onclick="extractCookies()">
+                            📡 自动提取 Cookie
+                        </button>
+                    </div>
+                    
+                    <!-- 提取结果显示 -->
+                    <div id="extractResult" class="mt-3" style="display: none;">
+                        <div class="alert alert-info" role="alert">
+                            <h6 class="alert-heading">📊 提取日志</h6>
+                            <pre id="extractLogs" class="mb-0 small" style="white-space: pre-wrap; max-height: 200px; overflow-y: auto;"></pre>
+                        </div>
+                        
+                        <div id="extractedCookiesSection" style="display: none;">
+                            <h6 class="small text-muted mb-2">提取到的 Cookie：</h6>
+                            <div id="extractedCookiesList" class="small mb-2"></div>
+                            
+                            <div class="input-group mb-2">
+                                <input type="text" id="extractedAccountName" class="form-control" placeholder="账号备注名">
+                                <button class="btn btn-success" type="button" onclick="autoAddAccount()">
+                                    ➕ 添加到账号池
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 手动添加功能 -->
+                <div class="card p-3">
+                    <h5 class="card-title mb-3">➕ 手动添加 Gemini 账号</h5>
+                    <form action="/account/add" method="post">
+                        <div class="mb-2">
+                            <label class="small text-muted">备注名</label>
+                            <input type="text" class="form-control" name="name" placeholder="例如: 谷歌主号" required>
+                        </div>
+                        <div class="mb-2">
+                            <label class="small text-muted">Cookie: __Secure-1PSID</label>
+                            <input type="text" class="form-control" name="p1" placeholder="从浏览器 F12 获取" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="small text-muted">Cookie: __Secure-1PSIDTS</label>
+                            <input type="text" class="form-control" name="p2" placeholder="从浏览器 F12 获取" required>
+                        </div>
+                        <button type="submit" class="btn btn-dark w-100">确认添加</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="col-lg-8">
+                
+                <div class="card p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="card-title m-0">👥 账号负载均衡池</h5>
+                        <span class="badge bg-light text-dark border">共 {{ accounts|length }} 个账号</span>
+                    </div>
+                    
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>状态</th>
+                                    <th>备注</th>
+                                    <th>Cookie预览</th>
+                                    <th>累计调用</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% if not accounts %}
+                                <tr><td colspan="5" class="text-center text-muted py-4">暂无账号，请在左侧添加</td></tr>
+                                {% endif %}
+                                {% for acc in accounts %}
+                                <tr>
+                                    <td>
+                                        {% if acc.is_active %}
+                                        <span class="status-dot status-active"></span><span class="small text-success">启用</span>
+                                        {% else %}
+                                        <span class="status-dot status-inactive"></span><span class="small text-danger">禁用</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="fw-bold">{{ acc.name }}</td>
+                                    <td class="small text-muted" style="font-family: monospace;">{{ acc.cookie_1psid[:8] }}...</td>
+                                    <td><span class="badge bg-primary rounded-pill">{{ acc.total_calls }}</span></td>
+                                    <td>
+                                        <a href="/account/toggle/{{ acc.id }}" class="btn btn-sm btn-outline-secondary py-0">切换</a>
+                                        <a href="/account/delete/{{ acc.id }}" class="btn btn-sm btn-outline-danger py-0">删除</a>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="card-title m-0">📊 实时调用日志</h5>
+                        <a href="/logs/clear" class="btn btn-sm btn-light border">清空日志</a>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped">
+                            <thead><tr><th>时间</th><th>执行账号</th><th>模型</th><th>耗时</th><th>状态</th></tr></thead>
+                            <tbody>
+                                {% if not logs %}
+                                <tr><td colspan="5" class="text-center text-muted py-3">暂无调用记录</td></tr>
+                                {% endif %}
+                                {% for log in logs %}
+                                <tr>
+                                    <td class="small">{{ log.timestamp.split(' ')[1] }}</td>
+                                    <td class="small">{{ log.account_name }}</td>
+                                    <td><span class="badge bg-secondary" style="font-size: 0.7rem">{{ log.model }}</span></td>
+                                    <td class="small">{{ log.duration }}ms</td>
+                                    <td>
+                                        {% if log.status == 'SUCCESS' %}
+                                        <span class="badge bg-success">成功</span>
+                                        {% else %}
+                                        <span class="badge bg-danger">失败</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let extractedData = null;
+
+        async function extractCookies() {
+            const harContent = document.getElementById('harContent').value.trim();
+            const resultDiv = document.getElementById('extractResult');
+            const logsPre = document.getElementById('extractLogs');
+            const cookiesSection = document.getElementById('extractedCookiesSection');
+            const cookiesList = document.getElementById('extractedCookiesList');
+            
+            if (!harContent) {
+                alert('请粘贴 HAR 文件内容或网络请求信息');
+                return;
+            }
+
+            // 显示加载状态
+            const extractBtn = event.target;
+            const originalText = extractBtn.innerHTML;
+            extractBtn.innerHTML = '<span class="loading-spinner"></span> 正在解析...';
+            extractBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/extract-cookies', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ content: harContent })
+                });
+
+                const result = await response.json();
+                
+                // 显示结果区域
+                resultDiv.style.display = 'block';
+                logsPre.textContent = result.logs || '无日志信息';
+
+                if (result.success && result.data) {
+                    extractedData = result.data;
+                    
+                    // 显示提取到的 Cookie
+                    const cookies = result.data.cookies;
+                    const missingCookies = result.data.missing_cookies || [];
+                    
+                    let cookiesHtml = '';
+                    for (const [name, value] of Object.entries(cookies)) {
+                        const isMissing = missingCookies.includes(name);
+                        cookiesHtml += `
+                            <div class="mb-1">
+                                <span class="badge ${isMissing ? 'bg-warning' : 'bg-success'}">${name}</span>
+                                <code class="ms-2">${value.substring(0, 30)}${value.length > 30 ? '...' : ''}</code>
+                                ${isMissing ? '<small class="text-warning ms-2">(可能缺失)</small>' : ''}
+                            </div>
+                        `;
+                    }
+                    
+                    cookiesList.innerHTML = cookiesHtml || '<p class="text-muted">未提取到 Cookie</p>';
+                    
+                    // 显示 Cookie 列表和添加按钮
+                    cookiesSection.style.display = 'block';
+                    
+                    // 设置默认账号名
+                    const accountNameInput = document.getElementById('extractedAccountName');
+                    if (!accountNameInput.value) {
+                        accountNameInput.value = `自动提取_${new Date().toLocaleString()}`;
+                    }
+                } else {
+                    extractedData = null;
+                    cookiesSection.style.display = 'none';
+                    
+                    if (result.error) {
+                        logsPre.textContent += '\n\n❌ 错误: ' + result.error;
+                    }
+                }
+            } catch (error) {
+                console.error('提取失败:', error);
+                resultDiv.style.display = 'block';
+                logsPre.textContent = '网络请求失败: ' + error.message;
+                cookiesSection.style.display = 'none';
+            } finally {
+                // 恢复按钮状态
+                extractBtn.innerHTML = originalText;
+                extractBtn.disabled = false;
+            }
+        }
+
+        async function autoAddAccount() {
+            if (!extractedData || !extractedData.cookies) {
+                alert('请先提取 Cookie');
+                return;
+            }
+
+            const accountName = document.getElementById('extractedAccountName').value.trim();
+            if (!accountName) {
+                alert('请输入账号备注名');
+                return;
+            }
+
+            const addBtn = event.target;
+            const originalText = addBtn.innerHTML;
+            addBtn.innerHTML = '<span class="loading-spinner"></span> 添加中...';
+            addBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/auto-add-account', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        name: accountName,
+                        cookies: extractedData.cookies
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    alert('账号添加成功！');
+                    // 刷新页面以显示新账号
+                    window.location.reload();
+                } else {
+                    alert('添加失败: ' + (result.error || result.message || '未知错误'));
+                }
+            } catch (error) {
+                console.error('添加账号失败:', error);
+                alert('网络请求失败: ' + error.message);
+            } finally {
+                // 恢复按钮状态
+                addBtn.innerHTML = originalText;
+                addBtn.disabled = false;
+            }
+        }
+
+        // 页面加载完成后的初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            // 可以在这里添加更多初始化代码
+        });
+    </script>
+</body>
+</html>

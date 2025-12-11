@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+httpx
+loguru
+jinja2
+gemini_webapi>=1.17.3
+requests
